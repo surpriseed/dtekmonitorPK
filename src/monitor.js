@@ -10,7 +10,6 @@ import {
 } from "./constants.js"
 
 import {
-  capitalize,
   deleteLastMessage,
   getCurrentTime,
   loadLastMessage,
@@ -22,8 +21,8 @@ import {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 const getRandomDelay = () => {
-  const min = 5 * 60 * 1000   // 5 хв
-  const max = 10 * 60 * 1000  // 10 хв
+  const min = 5 * 60 * 1000
+  const max = 10 * 60 * 1000
   return Math.floor(Math.random() * (max - min + 1)) + min
 }
 
@@ -33,18 +32,16 @@ async function getInfo() {
   console.log("🌀 Getting info...")
 
   const browser = await chromium.launch({ headless: true })
-  const browserPage = await browser.newPage()
+  const page = await browser.newPage()
 
   try {
-    await browserPage.goto(SHUTDOWNS_PAGE, { waitUntil: "load" })
+    await page.goto(SHUTDOWNS_PAGE, { waitUntil: "load" })
 
-    const csrfTokenTag = await browserPage.waitForSelector(
-      'meta[name="csrf-token"]',
-      { state: "attached" }
-    )
-    const csrfToken = await csrfTokenTag.getAttribute("content")
+    const csrfToken = await page
+      .locator('meta[name="csrf-token"]')
+      .getAttribute("content")
 
-    const info = await browserPage.evaluate(
+    const info = await page.evaluate(
       async ({ CITY, STREET, csrfToken }) => {
         const formData = new URLSearchParams()
         formData.append("method", "getHomeNum")
@@ -63,7 +60,8 @@ async function getInfo() {
           },
           body: formData,
         })
-        return await response.json()
+
+        return response.json()
       },
       { CITY, STREET, csrfToken }
     )
@@ -104,25 +102,26 @@ function checkIsStabilization(info) {
 
 /* ================== MESSAGES ================== */
 
+function getOutageType(subType = "") {
+  const r = subType.toLowerCase()
+
+  if (r.includes("авар")) return "🔴🚨 Аварійне"
+  if (r.includes("екст")) return "🔥🚨 Екстрене"
+  if (r.includes("стабілізац") || r.includes("графік"))
+    return "🟡🗓️ Стабілізаційне"
+
+  return "⚡️"
+}
+
 function generateMessage(info) {
   const { sub_type = "", start_date, end_date } =
     info?.data?.[HOUSE] || {}
   const { updateTimestamp } = info || {}
 
-  const r = sub_type.toLowerCase()
-
-  let title = "⚡️ <b>Зафіксовано відключення</b>"
-
-  if (r.includes("авар")) {
-    title = "🔴🚨 <b>Аварійне відключення</b>"
-  } else if (r.includes("екст")) {
-    title = "🔥🚨 <b>Екстрене відключення</b>"
-  } else if (r.includes("стабілізац") || r.includes("графік")) {
-    title = "🟡🗓️ <b>Стабілізаційне відключення</b>"
-  }
+  const outageType = getOutageType(sub_type)
 
   return [
-    title,
+    `⚡️ <b>Зафіксовано ${outageType} відключення</b>`,
     "",
     `🪫 <b>Час початку:</b> <code>${start_date || "Невідомо"}</code>`,
     `🔌 <b>Орієнтовний час відновлення:</b> <code>${end_date || "Невідомо"}</code>`,
@@ -179,8 +178,7 @@ async function run() {
   const isScheduled = checkIsScheduled(info)
   const isStabilization = checkIsStabilization(info)
 
-  const shouldNotify =
-    isOutage && (!isScheduled || isStabilization)
+  const shouldNotify = isOutage && (!isScheduled || isStabilization)
 
   const lastMessage = loadLastMessage()
 
