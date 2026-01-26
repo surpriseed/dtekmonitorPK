@@ -17,6 +17,18 @@ import {
   saveLastMessage,
 } from "./helpers.js"
 
+/* ================== UTILS ================== */
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+const getRandomDelay = () => {
+  const min = 5 * 60 * 1000   // 5 хв
+  const max = 10 * 60 * 1000  // 10 хв
+  return Math.floor(Math.random() * (max - min + 1)) + min
+}
+
+/* ================== DATA ================== */
+
 async function getInfo() {
   console.log("🌀 Getting info...")
 
@@ -24,9 +36,7 @@ async function getInfo() {
   const browserPage = await browser.newPage()
 
   try {
-    await browserPage.goto(SHUTDOWNS_PAGE, {
-      waitUntil: "load",
-    })
+    await browserPage.goto(SHUTDOWNS_PAGE, { waitUntil: "load" })
 
     const csrfTokenTag = await browserPage.waitForSelector(
       'meta[name="csrf-token"]',
@@ -58,116 +68,140 @@ async function getInfo() {
       { CITY, STREET, csrfToken }
     )
 
-    console.log("✅ Getting info finished.")
     return info
-  } catch (error) {
-    throw Error(`❌ Getting info failed: ${error.message}`)
   } finally {
     await browser.close()
   }
 }
 
+/* ================== CHECKS ================== */
+
 function checkIsOutage(info) {
-  console.log("🌀 Checking power outage...")
+  const { sub_type, start_date, end_date, type } =
+    info?.data?.[HOUSE] || {}
 
-  if (!info?.data) {
-    throw Error("❌ Power outage info missed.")
-  }
-
-  const { sub_type, start_date, end_date, type } = info?.data?.[HOUSE] || {}
-  const isOutageDetected =
-    sub_type !== "" || start_date !== "" || end_date !== "" || type !== ""
-
-  isOutageDetected
-    ? console.log("🚨 Power outage detected!")
-    : console.log("⚡️ No power outage!")
-
-  return isOutageDetected
+  return (
+    sub_type !== "" ||
+    start_date !== "" ||
+    end_date !== "" ||
+    type !== ""
+  )
 }
 
 function checkIsScheduled(info) {
-  console.log("🌀 Checking whether power outage scheduled...")
+  const { sub_type = "" } = info?.data?.[HOUSE] || {}
+  const r = sub_type.toLowerCase()
 
-  if (!info?.data) {
-    throw Error("❌ Power outage info missed.")
-  }
-
-  const { sub_type } = info?.data?.[HOUSE] || {}
-  const isScheduled =
-    !sub_type.toLowerCase().includes("авар") &&
-    !sub_type.toLowerCase().includes("екст")
-
-  isScheduled
-    ? console.log("🗓️ Power outage scheduled!")
-    : console.log("⚠️ Power outage not scheduled!")
-
-  return isScheduled
+  return !r.includes("авар") && !r.includes("екст")
 }
 
-function generateMessage(info) {
-  console.log("🌀 Generating message...")
+function checkIsStabilization(info) {
+  const { sub_type = "" } = info?.data?.[HOUSE] || {}
+  const r = sub_type.toLowerCase()
 
-  const { sub_type, start_date, end_date } = info?.data?.[HOUSE] || {}
+  return r.includes("стабілізац") || r.includes("графік")
+}
+
+/* ================== MESSAGES ================== */
+
+function generateMessage(info) {
+  const { sub_type = "", start_date, end_date } =
+    info?.data?.[HOUSE] || {}
   const { updateTimestamp } = info || {}
 
-  const reason = capitalize(sub_type)
-  const begin = start_date.split(" ")[0]
-  const end = end_date.split(" ")[0]
+  const r = sub_type.toLowerCase()
+
+  let title = "⚡️ <b>Зафіксовано відключення</b>"
+
+  if (r.includes("авар")) {
+    title = "🔴🚨 <b>Аварійне відключення</b>"
+  } else if (r.includes("екст")) {
+    title = "🔥🚨 <b>Екстрене відключення</b>"
+  } else if (r.includes("стабілізац") || r.includes("графік")) {
+    title = "🟡🗓️ <b>Стабілізаційне відключення</b>"
+  }
 
   return [
-    "⚡️ <b>Зафіксовано відключення:</b>",
-    `🪫 <code>${begin} — ${end}</code>`,
+    title,
     "",
-    `⚠️ <i>${reason}.</i>`,
-    "\n",
-    `🔄 <i>${updateTimestamp}</i>`,
-    `💬 <i>${getCurrentTime()}</i>`,
+    `🪫 <b>Час початку:</b> <code>${start_date || "Невідомо"}</code>`,
+    `🔌 <b>Орієнтовний час відновлення:</b> <code>${end_date || "Невідомо"}</code>`,
+    "",
+    `🔄 <i>Дата оновлення інформації ${updateTimestamp || "Невідомо"}</i>`,
+    `💬 <i>Дата оновлення повідомлення ${getCurrentTime()}</i>`,
   ].join("\n")
 }
 
-async function sendNotification(message) {
-  if (!TELEGRAM_BOT_TOKEN)
-    throw Error("❌ Missing telegram bot token or chat id.")
-  if (!TELEGRAM_CHAT_ID) throw Error("❌ Missing telegram chat id.")
+function generateRecoveryMessage(info) {
+  const { updateTimestamp } = info || {}
 
-  console.log("🌀 Sending notification...")
-
-  const lastMessage = loadLastMessage() || {}
-  try {
-    const response = await fetch(
-      `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${
-        lastMessage.message_id ? "editMessageText" : "sendMessage"
-      }`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: TELEGRAM_CHAT_ID,
-          text: message,
-          parse_mode: "HTML",
-          message_id: lastMessage.message_id ?? undefined,
-        }),
-      }
-    )
-
-    const data = await response.json()
-    saveLastMessage(data.result)
-
-    console.log("🟢 Notification sent.")
-  } catch (error) {
-    console.log("🔴 Notification not sent.", error.message)
-    deleteLastMessage()
-  }
+  return [
+    "🟢💡 <b>Світлопостачання відновлено</b>",
+    "",
+    "⚡️ <i>Електроенергія подається у штатному режимі</i>",
+    "",
+    `🔄 <i>Дата оновлення інформації ${updateTimestamp || "Невідомо"}</i>`,
+    `💬 <i>Дата оновлення повідомлення ${getCurrentTime()}</i>`,
+  ].join("\n")
 }
+
+/* ================== TELEGRAM ================== */
+
+async function sendNotification(message) {
+  const lastMessage = loadLastMessage() || {}
+
+  const response = await fetch(
+    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${
+      lastMessage.message_id ? "editMessageText" : "sendMessage"
+    }`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: TELEGRAM_CHAT_ID,
+        text: message,
+        parse_mode: "HTML",
+        message_id: lastMessage.message_id ?? undefined,
+      }),
+    }
+  )
+
+  const data = await response.json()
+  saveLastMessage(data.result)
+}
+
+/* ================== MAIN ================== */
 
 async function run() {
   const info = await getInfo()
+
   const isOutage = checkIsOutage(info)
   const isScheduled = checkIsScheduled(info)
-  if (isOutage && !isScheduled) {
-    const message = generateMessage(info)
-    await sendNotification(message)
+  const isStabilization = checkIsStabilization(info)
+
+  const shouldNotify =
+    isOutage && (!isScheduled || isStabilization)
+
+  const lastMessage = loadLastMessage()
+
+  if (shouldNotify) {
+    await sendNotification(generateMessage(info))
+    return
+  }
+
+  // ⏳ підтвердження відновлення
+  if (!isOutage && lastMessage?.message_id) {
+    const delay = getRandomDelay()
+    console.log(`⏳ Waiting ${delay / 60000} min to confirm recovery...`)
+    await sleep(delay)
+
+    const recheckInfo = await getInfo()
+    const stillNoOutage = !checkIsOutage(recheckInfo)
+
+    if (stillNoOutage) {
+      await sendNotification(generateRecoveryMessage(recheckInfo))
+    }
   }
 }
 
-run().catch((error) => console.error(error.message))
+run().catch(console.error)
