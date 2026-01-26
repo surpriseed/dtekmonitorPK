@@ -10,7 +10,6 @@ import {
 } from "./constants.js"
 
 import {
-  deleteLastMessage,
   getCurrentTime,
   loadLastMessage,
   saveLastMessage,
@@ -24,6 +23,15 @@ const getRandomDelay = () => {
   const min = 5 * 60 * 1000
   const max = 10 * 60 * 1000
   return Math.floor(Math.random() * (max - min + 1)) + min
+}
+
+function buildUpdateHash(info) {
+  const h = info?.data?.[HOUSE] || {}
+  return JSON.stringify({
+    start: h.start_date || null,
+    end: h.end_date || null,
+    type: h.sub_type || null,
+  })
 }
 
 /* ================== DATA ================== */
@@ -74,23 +82,19 @@ async function getInfo() {
 
 /* ================== CHECKS ================== */
 
-/**
- * НАДІЙНА перевірка відключення під реальну поведінку ДТЕК
- */
 function checkIsOutage(info) {
   const house = info?.data?.[HOUSE]
   if (!house) return false
 
-  const sub = (house.sub_type || "").toLowerCase()
+  const { start_date, end_date } = house
 
-  // ДТЕК вважає, що світло Є, але поля можуть бути заповнені
-  if (
-    sub === "" ||
-    sub === "-" ||
-    sub.includes("немає") ||
-    sub.includes("відсут")
-  ) {
-    return false
+  if (!start_date && !end_date) return false
+
+  if (end_date) {
+    const end = new Date(end_date)
+    if (!isNaN(end) && end < new Date()) {
+      return false
+    }
   }
 
   return true
@@ -142,8 +146,14 @@ function generateRecoveryMessage(info) {
 
 /* ================== TELEGRAM ================== */
 
-async function sendNotification(message, isOutage) {
+async function sendNotification(message, isOutage, info) {
   const last = loadLastMessage() || {}
+  const updateHash = buildUpdateHash(info)
+
+  if (last.lastUpdateHash === updateHash && isOutage) {
+    console.log("ℹ️ No changes — skipping update")
+    return
+  }
 
   const response = await fetch(
     `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${
@@ -171,6 +181,8 @@ async function sendNotification(message, isOutage) {
   saveLastMessage({
     message_id: data.result.message_id,
     isOutage,
+    lastState: isOutage ? "OUTAGE" : "STABLE",
+    lastUpdateHash: updateHash,
   })
 }
 
@@ -179,27 +191,28 @@ async function sendNotification(message, isOutage) {
 async function run() {
   const info = await getInfo()
   const isOutage = checkIsOutage(info)
+  const updateHash = buildUpdateHash(info)
 
   const last = loadLastMessage() || {}
-  const wasOutage = last.isOutage ?? false
+  const lastState = last.lastState || "STABLE"
 
-  // 🔴 нове відключення або оновлення існуючого
+  console.log("DEBUG state:", { lastState, isOutage })
+
+  // 🔴 відключення або його оновлення
   if (isOutage) {
-    await sendNotification(generateOutageMessage(info), true)
+    await sendNotification(generateOutageMessage(info), true, info)
     return
   }
 
   // 🟢 підтверджене відновлення
-  if (wasOutage && !isOutage) {
+  if (lastState === "OUTAGE" && !isOutage) {
     const delay = getRandomDelay()
     console.log(`⏳ Waiting ${delay / 60000} min to confirm recovery...`)
     await sleep(delay)
 
     const recheck = await getInfo()
-    const stillNoOutage = !checkIsOutage(recheck)
-
-    if (stillNoOutage) {
-      await sendNotification(generateRecoveryMessage(recheck), false)
+    if (!checkIsOutage(recheck)) {
+      await sendNotification(generateRecoveryMessage(recheck), false, recheck)
     }
   }
 }
