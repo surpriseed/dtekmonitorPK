@@ -74,33 +74,27 @@ async function getInfo() {
 
 /* ================== CHECKS ================== */
 
+/**
+ * НАДІЙНА перевірка відключення під реальну поведінку ДТЕК
+ */
 function checkIsOutage(info) {
-  const { sub_type, start_date, end_date, type } =
-    info?.data?.[HOUSE] || {}
+  const house = info?.data?.[HOUSE]
+  if (!house) return false
 
-  return (
-    sub_type !== "" ||
-    start_date !== "" ||
-    end_date !== "" ||
-    type !== ""
-  )
+  const sub = (house.sub_type || "").toLowerCase()
+
+  // ДТЕК вважає, що світло Є, але поля можуть бути заповнені
+  if (
+    sub === "" ||
+    sub === "-" ||
+    sub.includes("немає") ||
+    sub.includes("відсут")
+  ) {
+    return false
+  }
+
+  return true
 }
-
-function checkIsScheduled(info) {
-  const { sub_type = "" } = info?.data?.[HOUSE] || {}
-  const r = sub_type.toLowerCase()
-
-  return !r.includes("авар") && !r.includes("екст")
-}
-
-function checkIsStabilization(info) {
-  const { sub_type = "" } = info?.data?.[HOUSE] || {}
-  const r = sub_type.toLowerCase()
-
-  return r.includes("стабілізац") || r.includes("графік")
-}
-
-/* ================== MESSAGES ================== */
 
 function getOutageType(subType = "") {
   const r = subType.toLowerCase()
@@ -113,7 +107,9 @@ function getOutageType(subType = "") {
   return "⚡️"
 }
 
-function generateMessage(info) {
+/* ================== MESSAGES ================== */
+
+function generateOutageMessage(info) {
   const { sub_type = "", start_date, end_date } =
     info?.data?.[HOUSE] || {}
   const { updateTimestamp } = info || {}
@@ -146,12 +142,12 @@ function generateRecoveryMessage(info) {
 
 /* ================== TELEGRAM ================== */
 
-async function sendNotification(message) {
-  const lastMessage = loadLastMessage() || {}
+async function sendNotification(message, isOutage) {
+  const last = loadLastMessage() || {}
 
   const response = await fetch(
     `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${
-      lastMessage.message_id ? "editMessageText" : "sendMessage"
+      last.message_id ? "editMessageText" : "sendMessage"
     }`,
     {
       method: "POST",
@@ -160,44 +156,50 @@ async function sendNotification(message) {
         chat_id: TELEGRAM_CHAT_ID,
         text: message,
         parse_mode: "HTML",
-        message_id: lastMessage.message_id ?? undefined,
+        message_id: last.message_id ?? undefined,
       }),
     }
   )
 
   const data = await response.json()
-  saveLastMessage(data.result)
+
+  if (!data.ok) {
+    console.error("❌ Telegram error:", data)
+    return
+  }
+
+  saveLastMessage({
+    message_id: data.result.message_id,
+    isOutage,
+  })
 }
 
 /* ================== MAIN ================== */
 
 async function run() {
   const info = await getInfo()
-
   const isOutage = checkIsOutage(info)
-  const isScheduled = checkIsScheduled(info)
-  const isStabilization = checkIsStabilization(info)
 
-  const shouldNotify = isOutage && (!isScheduled || isStabilization)
+  const last = loadLastMessage() || {}
+  const wasOutage = last.isOutage ?? false
 
-  const lastMessage = loadLastMessage()
-
-  if (shouldNotify) {
-    await sendNotification(generateMessage(info))
+  // 🔴 нове відключення або оновлення існуючого
+  if (isOutage) {
+    await sendNotification(generateOutageMessage(info), true)
     return
   }
 
-  // ⏳ підтвердження відновлення
-  if (!isOutage && lastMessage?.message_id) {
+  // 🟢 підтверджене відновлення
+  if (wasOutage && !isOutage) {
     const delay = getRandomDelay()
     console.log(`⏳ Waiting ${delay / 60000} min to confirm recovery...`)
     await sleep(delay)
 
-    const recheckInfo = await getInfo()
-    const stillNoOutage = !checkIsOutage(recheckInfo)
+    const recheck = await getInfo()
+    const stillNoOutage = !checkIsOutage(recheck)
 
     if (stillNoOutage) {
-      await sendNotification(generateRecoveryMessage(recheckInfo))
+      await sendNotification(generateRecoveryMessage(recheck), false)
     }
   }
 }
