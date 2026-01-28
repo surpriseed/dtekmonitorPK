@@ -3,50 +3,58 @@ import path from "node:path"
 
 import { LAST_MESSAGE_FILE } from "./constants.js"
 
+/* ================== STRING ================== */
+
 export function capitalize(str) {
   if (typeof str !== "string") return ""
   return str[0].toUpperCase() + str.slice(1).toLowerCase()
 }
 
+/* ================== DATE ================== */
+
+export function getToday() {
+  return new Date().toLocaleDateString("en-CA", {
+    timeZone: "Europe/Kyiv",
+  }) // YYYY-MM-DD
+}
+
+/* ================== STORAGE ================== */
+
 export function loadLastMessage() {
   if (!fs.existsSync(LAST_MESSAGE_FILE)) return null
 
-  const lastMessage = JSON.parse(
-    fs.readFileSync(LAST_MESSAGE_FILE, "utf8").trim()
-  )
-
-  if (lastMessage?.date) {
-    const messageDay = new Date(lastMessage.date * 1000).toLocaleDateString(
-      "en-CA",
-      { timeZone: "Europe/Kyiv" }
-    )
-    const today = new Date().toLocaleDateString("en-CA", {
-      timeZone: "Europe/Kyiv",
-    })
-
-    if (messageDay < today) {
-      deleteLastMessage()
-      return null
-    }
+  try {
+    return JSON.parse(fs.readFileSync(LAST_MESSAGE_FILE, "utf8"))
+  } catch (e) {
+    console.error("❌ Failed to parse last message file", e)
+    return null
   }
-
-  return lastMessage
 }
 
-export function saveLastMessage({ date, message_id } = {}) {
+export function saveLastMessage({ message_id, isOutage, publishedAt } = {}) {
   fs.mkdirSync(path.dirname(LAST_MESSAGE_FILE), { recursive: true })
+
   fs.writeFileSync(
     LAST_MESSAGE_FILE,
-    JSON.stringify({
-      message_id,
-      date,
-    })
+    JSON.stringify(
+      {
+        message_id,
+        isOutage,
+        publishedAt: publishedAt || getToday(),
+      },
+      null,
+      2
+    )
   )
 }
 
 export function deleteLastMessage() {
-  fs.rmdirSync(path.dirname(LAST_MESSAGE_FILE), { recursive: true })
+  if (fs.existsSync(LAST_MESSAGE_FILE)) {
+    fs.unlinkSync(LAST_MESSAGE_FILE)
+  }
 }
+
+/* ================== TIME ================== */
 
 export function getCurrentTime() {
   const now = new Date()
