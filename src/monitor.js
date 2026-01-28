@@ -10,9 +10,11 @@ import {
 } from "./constants.js"
 
 import {
+  deleteLastMessage,
   getCurrentTime,
   loadLastMessage,
   saveLastMessage,
+  getToday,
 } from "./helpers.js"
 
 /* ================== UTILS ================== */
@@ -25,20 +27,9 @@ const getRandomDelay = () => {
   return Math.floor(Math.random() * (max - min + 1)) + min
 }
 
-function buildUpdateHash(info) {
-  const h = info?.data?.[HOUSE] || {}
-  return JSON.stringify({
-    start: h.start_date || null,
-    end: h.end_date || null,
-    type: h.sub_type || null,
-  })
-}
-
 /* ================== DATA ================== */
 
 async function getInfo() {
-  console.log("🌀 Getting info...")
-
   const browser = await chromium.launch({ headless: true })
   const page = await browser.newPage()
 
@@ -49,7 +40,7 @@ async function getInfo() {
       .locator('meta[name="csrf-token"]')
       .getAttribute("content")
 
-    const info = await page.evaluate(
+    return await page.evaluate(
       async ({ CITY, STREET, csrfToken }) => {
         const formData = new URLSearchParams()
         formData.append("method", "getHomeNum")
@@ -73,8 +64,6 @@ async function getInfo() {
       },
       { CITY, STREET, csrfToken }
     )
-
-    return info
   } finally {
     await browser.close()
   }
@@ -86,15 +75,15 @@ function checkIsOutage(info) {
   const house = info?.data?.[HOUSE]
   if (!house) return false
 
-  const { start_date, end_date } = house
+  const sub = (house.sub_type || "").toLowerCase()
 
-  if (!start_date && !end_date) return false
-
-  if (end_date) {
-    const end = new Date(end_date)
-    if (!isNaN(end) && end < new Date()) {
-      return false
-    }
+  if (
+    sub === "" ||
+    sub === "-" ||
+    sub.includes("немає") ||
+    sub.includes("відсут")
+  ) {
+    return false
   }
 
   return true
@@ -102,12 +91,10 @@ function checkIsOutage(info) {
 
 function getOutageType(subType = "") {
   const r = subType.toLowerCase()
-
   if (r.includes("авар")) return "🔴🚨 Аварійне"
   if (r.includes("екст")) return "🔥🚨 Екстрене"
   if (r.includes("стабілізац") || r.includes("графік"))
     return "🟡🗓️ Стабілізаційне"
-
   return "⚡️"
 }
 
@@ -118,10 +105,8 @@ function generateOutageMessage(info) {
     info?.data?.[HOUSE] || {}
   const { updateTimestamp } = info || {}
 
-  const outageType = getOutageType(sub_type)
-
   return [
-    `⚡️ <b>Зафіксовано ${outageType} відключення</b>`,
+    `⚡️ <b>Зафіксовано ${getOutageType(sub_type)} відключення</b>`,
     "",
     `🪫 <b>Час початку:</b> <code>${start_date || "Невідомо"}</code>`,
     `🔌 <b>Орієнтовний час відновлення:</b> <code>${end_date || "Невідомо"}</code>`,
@@ -146,19 +131,17 @@ function generateRecoveryMessage(info) {
 
 /* ================== TELEGRAM ================== */
 
-async function sendNotification(message, isOutage, info) {
+async function sendNotification(message, isOutage) {
   const last = loadLastMessage() || {}
-  const updateHash = buildUpdateHash(info)
+  const today = getToday()
 
-  if (last.lastUpdateHash === updateHash && isOutage) {
-    console.log("ℹ️ No changes — skipping update")
-    return
-  }
+  // ✅ якщо сьогодні ще не було публікації → нове повідомлення
+  const shouldSendNew = !last.message_id || last.publishedAt !== today
+
+  const method = shouldSendNew ? "sendMessage" : "editMessageText"
 
   const response = await fetch(
-    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${
-      last.message_id ? "editMessageText" : "sendMessage"
-    }`,
+    `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/${method}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -166,13 +149,12 @@ async function sendNotification(message, isOutage, info) {
         chat_id: TELEGRAM_CHAT_ID,
         text: message,
         parse_mode: "HTML",
-        message_id: last.message_id ?? undefined,
+        message_id: shouldSendNew ? undefined : last.message_id,
       }),
     }
   )
 
   const data = await response.json()
-
   if (!data.ok) {
     console.error("❌ Telegram error:", data)
     return
@@ -181,8 +163,7 @@ async function sendNotification(message, isOutage, info) {
   saveLastMessage({
     message_id: data.result.message_id,
     isOutage,
-    lastState: isOutage ? "OUTAGE" : "STABLE",
-    lastUpdateHash: updateHash,
+    publishedAt: today,
   })
 }
 
@@ -191,28 +172,24 @@ async function sendNotification(message, isOutage, info) {
 async function run() {
   const info = await getInfo()
   const isOutage = checkIsOutage(info)
-  const updateHash = buildUpdateHash(info)
 
   const last = loadLastMessage() || {}
-  const lastState = last.lastState || "STABLE"
+  const wasOutage = last.isOutage ?? false
 
-  console.log("DEBUG state:", { lastState, isOutage })
-
-  // 🔴 відключення або його оновлення
+  // 🔴 нове відключення або оновлення існуючого
   if (isOutage) {
-    await sendNotification(generateOutageMessage(info), true, info)
+    await sendNotification(generateOutageMessage(info), true)
     return
   }
 
   // 🟢 підтверджене відновлення
-  if (lastState === "OUTAGE" && !isOutage) {
+  if (wasOutage && !isOutage) {
     const delay = getRandomDelay()
-    console.log(`⏳ Waiting ${delay / 60000} min to confirm recovery...`)
     await sleep(delay)
 
     const recheck = await getInfo()
     if (!checkIsOutage(recheck)) {
-      await sendNotification(generateRecoveryMessage(recheck), false, recheck)
+      await sendNotification(generateRecoveryMessage(recheck), false)
     }
   }
 }
